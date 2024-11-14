@@ -1,0 +1,9 @@
+.idea/
+__pycache__/
+data/
+models
+output
+venv/
+config.json
+test.py
+/start.sh
