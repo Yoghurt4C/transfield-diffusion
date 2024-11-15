@@ -9,6 +9,7 @@ import traceback
 from datetime import datetime as Date
 from pathlib import Path
 from queue import Queue, PriorityQueue
+from re import RegexFlag
 from textwrap import wrap
 from threading import Thread
 from time import sleep
@@ -17,6 +18,7 @@ import discord.permissions
 import requests
 from civitai_downloader import api_class as CivClass
 from civitai_downloader import download_file
+from civitai_downloader.api_class import ModelVersion, BaseModel
 from civitai_downloader.client import APIClient
 from discord import ApplicationContext
 from discord import Colour
@@ -123,7 +125,7 @@ def connectToSD():
         wildcardDir = sdDir.joinpath('wildcards')
         if not wildcardDir.exists():
             print('Couldn\'t find the \"Dynamic Prompts\" extension. Wildcards are disabled.')
-        wildcardDir = None
+            wildcardDir = None
         return True
     return False
 
@@ -237,6 +239,8 @@ def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
                                     f'Can\'t generate an image larger than 1024x1024 due to vram constraints. Try 1024x768 or 1280x800')
                             obj['width'] = w
                             obj['height'] = h
+                        elif len(res) == 1:
+                            obj['width'] = obj['height'] = min(1024, int(res[0]))
                         else:
                             raise SyntaxError(
                                 f'Invalid value passed to the `{res}` parameter. Example resolution: `res:1024x768`.')
@@ -325,8 +329,6 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
             height *= scale
         obj['width'] = int(width - (width % 8))
         obj['height'] = int(height - (height % 8))
-    # elif 'img_scale' in defSettings:
-    #    actual['img_scale'] = defSettings['img_scale']
     for k, v in obj.items():
         if k == 'prompt' or k == 'negative_prompt':
             actual[k] = formatPrompt(k, nodef, obj, defSettings, shouldFormat)
@@ -615,8 +617,8 @@ async def search(ctx: Context, query: str, page: int = 1, limit: int = 20, tag: 
     for model in models.items:
         versions = ''
         for version in model.modelVersions:
-            if version.baseModel == CivClass.BaseModel.PONY.value:
-                versions += f'**!autism civitai info {version.id}** | Version: __{version.name}__'
+            if version.baseModel == CivClass.BaseModel.PONY.value or version.baseModel == CivClass.BaseModel.SDXL.value:
+                versions += f'**!autism civitai info {version.id}** | Model: {'[🐴💖]' if version.baseModel == BaseModel.PONY.value else '[🇽🇱]'} | Version: __{version.name}__'
                 if version.trainedWords:
                     versions += f'| Trigger Words:\n```\n{', '.join(version.trainedWords)}\n```\n'
                 else:
@@ -645,7 +647,7 @@ async def search(ctx: Context, query: str, page: int = 1, limit: int = 20, tag: 
         await ctx.reply(reply)
 
 
-def convert_civitai_meta(embed: Embed, image: CivClass.ModelVersionImages):
+def sample_image_meta(embed: Embed, name: str, image: CivClass.ModelVersionImages):
     def populateData(key: str, obj: dict, meta: dict):
         if key in meta:
             obj[key] = meta[key]
@@ -653,7 +655,20 @@ def convert_civitai_meta(embed: Embed, image: CivClass.ModelVersionImages):
     meta = image.meta
     data = {}
     populateData('seed', data, meta)
-    populateData('prompt', data, meta)
+    warning = ''
+    if 'prompt' in meta:
+        prompt = meta['prompt']
+        if matches := re.findall(r'<lora:([^:]+):[0-9.]+>', prompt, flags=RegexFlag.MULTILINE):
+            flag = True
+            for match in matches:
+                if match == name:
+                    flag = False
+                    break
+            if flag: warning = f'*This prompt does **not** contain `<lora:{name}:1>`.*\n'
+        else:
+            warning = f'*This prompt does **not** contain `<lora:{name}:1>`.*\n'
+        data['prompt'] = prompt
+
     populateData('steps', data, meta)
     if 'negativePrompt' in meta:
         data['negative_prompt'] = meta['negativePrompt']
@@ -674,7 +689,7 @@ def convert_civitai_meta(embed: Embed, image: CivClass.ModelVersionImages):
             data['sampler_name'] = sampler
 
     if data:
-        embed.add_field(name='Image Prompt', value=prettyPrintSettings(data, format=True), inline=False)
+        embed.add_field(name='Sample Prompt', value=warning + prettyPrintSettings(data, format=True), inline=False)
 
 
 def download_civitai_image(filename: str, url: str):
@@ -690,25 +705,48 @@ def download_civitai_image(filename: str, url: str):
     return file
 
 
+def loadLoraInfo(name: str) -> dict:
+    with open(name, 'rb') as f:
+        file = json.load(f)
+        f.close()
+        return file
+
+
+def parseLoraInfo(embed: Embed, model: ModelVersion, filename: str) -> str:
+    prompt = f'<lora:{filename}:1> '
+    embed.set_author(name=prompt)
+    mBase = '[🐴💖] ' if model.baseModel == BaseModel.PONY.value else '[🇽🇱] '
+    embed.title = f'{mBase} {model.model.get("name")}'
+    embed.description = stripHTML(model.description)
+    if 'description' in model.model and model.description != model.model['description']:
+        embed.add_field(name='About Version', value=stripHTML(model.model['description']), inline=False)
+    if model.trainedWords:
+        triggers = list()
+        for w in model.trainedWords:
+            triggers.extend(w.split(','))
+        triggers = list(dict.fromkeys(triggers))
+        prompt += ', '.join(triggers[:4] if len(triggers) > 4 else triggers)
+        embed.add_field(name='Trigger Words', value=', '.join(triggers), inline=False)
+    embed.add_field(name='Civitai Page', value=f'https://civitai.com/models/{model.modelId}?modelVersionId={model.id}')
+    if model.images and model.images[0].meta is not None:
+        sample_image_meta(embed, filename, model.images[0])
+    return f'`{prompt}`'
+
+
 @civitai.command("info")
-async def c_info(ctx: Context, model_version: int, info: str | None = None):
+async def c_info(ctx: Context, model_version: int):
     version = capi.get_model_version(model_version)
     file = version.files[0]
     for f in version.files:
         if f.primary:
             file = f
-    embed = Embed(title=file.name, description=version.description, colour=Colour.blurple())
+            break
+    embed = Embed(colour=Colour.blurple())
     image = version.images[0]
-    file = download_civitai_image(file.name.replace('safetensors', 'preview.jpg'), image.url)
-    if version.trainedWords:
-        embed.add_field(name='Trigger Words', value=', '.join(version.trainedWords))
-    if image.meta is not None:
-        convert_civitai_meta(embed, image)
-
-    if info is None:
-        await ctx.reply(embed=embed, file=File(file))
-    else:
-        await ctx.reply(content=info, embed=embed, file=File(file))
+    filename = file.name[:-12]
+    img = download_civitai_image(file.name + '.preview.jpg', image.url)
+    prompt = parseLoraInfo(embed, version, file.name)
+    await ctx.reply(content=prompt, embed=embed, file=File(img))
 
 
 @civitai.command('download')
@@ -722,13 +760,16 @@ async def c_download(ctx: Context, model_version: int):
         await ctx.reply(f'This can only download LoRA and LoCon/LyCORIS tensors.')
         return
     file = obj['files'][0]
-    for f in obj['files']:
-        if f['primary']:
-            file = f
     filename = file['name']
     info = filename.replace('safetensors', 'civitai.info')
+    if not obj['description']:
+        model = capi.get_model(obj['modelId'])
+        description = model.description
+    else:
+        description = obj['description']
+    obj['description'] = description
     sdinfo = filename.replace('safetensors', 'json')
-    await c_info(ctx, model_version, 'Attempting to download model:')
+    await c_info(ctx, model_version)
     result = download_file('https://civitai.com/api/download/models/' + str(model_version), str(loraDir), civToken)
     if result:
         with open(loraDir.joinpath(info), 'w') as f:
@@ -736,7 +777,7 @@ async def c_download(ctx: Context, model_version: int):
             f.close()
 
         sdi = {
-            'description': obj['description'] if 'description' in obj else '',
+            'description': description,
             'sd version': 'SDXL',
             'activation text': obj['triggerWords'] if 'triggerWords' in obj else '',
             'preferred weight': 0
@@ -789,26 +830,14 @@ async def listLoras(ctx: Context, *, message: str = ''):
         embed = Embed(colour=Colour.blurple())
         lora = loras[li[0].split(':')[1]]
         info = loadLoraInfo(lora[0])
+        files = info['files']
+        file = files[0]
+        for f in files:
+            if f['primary']:
+                file = f
+                break
+        reply = parseLoraInfo(embed, capi._model_version._parse_model_version(info), file['name'][:-12])
         img = lora[1]
-        embed.set_author(name=info['files'][0]['name'])
-        embed.title = info['model']['name']
-        if 'description' in info['model']:
-            embed.description = stripHTML(info['model']['description'])
-        elif 'description' in info and info['description']:
-            embed.description = stripHTML(info['description'])
-        else:
-            embed.description = '*This LoRA does not have a description.*'
-        triggers: list
-        if triggers := info['trainedWords']:
-            if len(triggers) > 4:
-                b = []
-                for i in range(4): b.append(triggers.pop(0))
-                reply = f'`{li[0]} {s.join(b)}`'
-                embed.add_field(name='Full trigger word list:', value=s.join(triggers))
-            else:
-                reply = f'`{li[0]} {s.join(triggers)}`'
-        else:
-            reply = f'`{li[0]}`'
         await ctx.reply(reply, embed=embed, file=None if img is None else File(img))
     else:
         reply = f'\n**Listed {len(li)} LoRAs.** *To view details for a specific LoRA, use filtering to reduce the amount of results down to 1.*'
@@ -913,13 +942,6 @@ def getWildcards():
     files = wildcardDir.glob('*.txt')
     for file in files:
         wildcardList.append(file.stem)
-
-
-def loadLoraInfo(name: str) -> dict:
-    with open(name, 'rb') as f:
-        file = json.load(f)
-        f.close()
-        return file
 
 
 def mainThread():
