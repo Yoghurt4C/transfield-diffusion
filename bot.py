@@ -969,20 +969,20 @@ def genAndRespond(obj: dict):
 def aDetailerPayload(settings: dict, genType: str):
     if genType == 'img2img' and 'adetailer' in settings:
         settings.pop('adetailer')
-    settings['alwayson_scripts'].pop('forge couple')
-    ad_settings = settings['alwayson_scripts']['ADetailer']['args']
-    ad_settings[0] = True
-    ad_settings[1] = True
-    ad_obj = dict(ad_payload)
-    ad_obj['ad_prompt'] = settings['prompt']
-    ad_obj['ad_negative_prompt'] = settings['negative_prompt']
-    if 'ad_denoising_strength' in settings:
-        ad_obj['ad_denoising_strength'] = settings.pop('ad_denoising_strength')
-    if 'ad_inpaint_width' in settings and 'ad_inpaint_height' in settings:
-        ad_obj['ad_use_inpaint_width_height'] = True
-        ad_obj['ad_inpaint_width'] = settings.pop('ad_inpaint_width')
-        ad_obj['ad_inpaint_height'] = settings.pop('ad_inpaint_height')
-    ad_settings.append(ad_obj)
+        settings['alwayson_scripts'].pop('forge couple')
+        ad_settings = settings['alwayson_scripts']['ADetailer']['args']
+        ad_settings[0] = True
+        ad_settings[1] = True
+        ad_obj = dict(ad_payload)
+        ad_obj['ad_prompt'] = settings['prompt']
+        ad_obj['ad_negative_prompt'] = settings['negative_prompt']
+        if 'ad_denoising_strength' in settings:
+            ad_obj['ad_denoising_strength'] = settings.pop('ad_denoising_strength')
+        if 'ad_inpaint_width' in settings and 'ad_inpaint_height' in settings:
+            ad_obj['ad_use_inpaint_width_height'] = True
+            ad_obj['ad_inpaint_width'] = settings.pop('ad_inpaint_width')
+            ad_obj['ad_inpaint_height'] = settings.pop('ad_inpaint_height')
+        ad_settings.append(ad_obj)
 
 
 def getSamplers():
