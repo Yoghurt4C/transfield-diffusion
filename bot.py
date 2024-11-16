@@ -77,8 +77,8 @@ userdata = {}
 payload = {
     "prompt": "{}",
     "negative_prompt": "rating_explicit, text, watermark, logo, {}",
-    "width": 768,
-    "height": 1024,
+    "width": 576,
+    "height": 768,
     'infotext': ''
 }
 
@@ -86,16 +86,37 @@ alwayson = {
     "alwayson_scripts": {
         "Never OOM Integrated": {
             "args": [
-                "0", True,
-                "1", True
+                True, True
+            ]
+        },
+        "ADetailer": {
+            "args": [
+                False,
+                False
+            ]
+        },
+        "forge couple": {
+            "args": [
+                True,
+                False,
+                "Basic",
+                "[SEP]",
+                "Horizontal",
+                "First Line",
+                0.3,
+                None
             ]
         }
     }
 }
 
+ad_payload = {
+    "ad_model": "face_yolov8n.pt"
+}
+
 txtDefaults = {
-    "steps": 15,
-    "cfg_scale": 3,
+    "steps": 12,
+    "cfg_scale": 3.5,
     "sampler_name": "Euler a",
 }
 
@@ -210,6 +231,23 @@ async def advPrompt(ctx: discord.ApplicationContext, prompt: str, negs: str = No
 '''
 
 
+def parseRes(obj: dict, x: str, width: str, height: str):
+    res = x.split('x')
+    if len(res) == 2:
+        w = int(res[0])
+        h = int(res[1])
+        if w * h > 1048576:  # 1024x1024
+            raise SyntaxError(
+                f'Can\'t generate an image larger than 1024x1024 due to vram constraints. Try 1024x768 or 1280x800')
+        obj[width] = w
+        obj[height] = h
+    elif len(res) == 1:
+        obj[width] = obj[height] = min(1024, int(res[0]))
+    else:
+        raise SyntaxError(
+            f'Invalid value passed to the `res:{x}` parameter. Example resolution: `res:1024x768`.')
+
+
 def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
     match = re.search(cfgRegex, message)
     if match:
@@ -230,30 +268,23 @@ def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
                     elif k.startswith('sampler'):
                         obj['sampler_name'] = v
                     elif k.startswith('res'):
-                        res = v.split('x')
-                        if len(res) == 2:
-                            w = int(res[0])
-                            h = int(res[1])
-                            if w * h > 1048576:  # 1024x1024
-                                raise SyntaxError(
-                                    f'Can\'t generate an image larger than 1024x1024 due to vram constraints. Try 1024x768 or 1280x800')
-                            obj['width'] = w
-                            obj['height'] = h
-                        elif len(res) == 1:
-                            obj['width'] = obj['height'] = min(1024, int(res[0]))
-                        else:
-                            raise SyntaxError(
-                                f'Invalid value passed to the `{res}` parameter. Example resolution: `res:1024x768`.')
+                        parseRes(obj, v, 'width', 'height')
                     elif k == 'batch_size' or k == 'enable_hr':
                         raise ValueError(f'{k} is not available at this time.')
                     elif k.startswith('den'):
                         obj['denoising_strength'] = float(v)
                     elif k.startswith('scale'):
                         obj['img_scale'] = min(max(0.5, float(v)), 2)
+                    elif k.startswith('aden'):
+                        obj['ad_denoising_strength'] = float(v)
+                    elif k.startswith('ares'):
+                        parseRes(obj, v, 'ad_inpaint_width', 'ad_inpaint_height')
                     else:
                         obj[k] = v
                 elif s == 'ndt':
                     obj['no_defaults'] = True
+                elif s == 'adt':
+                    obj['adetailer'] = True
         except Exception as e:
             return traceback.format_exception_only(e)
         message = message[match.span()[1]:].strip()
@@ -276,17 +307,19 @@ def splitPrompts(prompt: str):
 
 
 def formatPrompt(key: str, nodef: bool, obj: dict, defSettings: dict, shouldFormat=True):
+    exists = key in obj
     if not defSettings or key not in defSettings:
-        return obj[key] if key in obj else payload[key]
+        return obj[key] if exists else payload[key]
     defPrompt = defSettings[key].strip()
-    if nodef or not defPrompt:
-        key = obj[key]
-    elif shouldFormat and '{}' in defPrompt:
-        key = defPrompt.format(obj[key])
-    elif key in obj:
-        key = defPrompt + (' ' if defPrompt.endswith(',') else ', ') + obj[key]
+    if exists:
+        if nodef or not defPrompt:
+            key = obj[key]
+        elif shouldFormat and '{}' in defPrompt:
+            key = defPrompt.format(obj[key])
+        else:
+            key = defPrompt + (' ' if defPrompt.endswith(',') else ', ') + obj[key]
     else:
-        key = defPrompt
+        key = '' if nodef else defPrompt
     return key
 
 
@@ -312,6 +345,9 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
     if defSettings is None:
         defSettings = payload
     nodef = 'no_defaults' in obj
+    adt = 'adetailer' in obj
+    for k in ['prompt', 'negative_prompt']:
+        actual[k] = formatPrompt(k, nodef, obj, defSettings, shouldFormat)
     if 'width' in obj and 'height' in obj:
         width = obj['width']
         height = obj['height']
@@ -329,9 +365,20 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
             height *= scale
         obj['width'] = int(width - (width % 8))
         obj['height'] = int(height - (height % 8))
+    if 'ad_inpaint_width' in obj and 'ad_inpaint_height' in obj:
+        if adt:
+            width = obj['ad_inpaint_width']
+            height = obj['ad_inpaint_height']
+            obj['ad_inpaint_width'] = int(width - (width % 8))
+            obj['ad_inpaint_height'] = int(height - (height % 8))
+        else:
+            obj.pop('ad_inpaint_width')
+            obj.pop('ad_inpaint_height')
+    if 'ad_denoising_strength' in obj and not adt:
+        obj.pop('ad_denoising_strength')
     for k, v in obj.items():
         if k == 'prompt' or k == 'negative_prompt':
-            actual[k] = formatPrompt(k, nodef, obj, defSettings, shouldFormat)
+            continue
         elif k == 'sampler_name':
             if v in samplers:
                 actual[k] = v
@@ -352,27 +399,36 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         'steps': 'stp',
         'sampler_name': 'sampler',
         'denoising_strength': 'den',
-        'img_scale': 'scale'
+        'img_scale': 'scale',
+        'ad_denoising_strength': 'aden'
     }
     skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale']
     reply = '!autism ['
     merged = dflt | obj if dflt else obj
     res = 'wxh'
+    ares = 'wxh'
     defres = f'{payload['width']}x{payload['height']}'
     for k, v in merged.items():
         if k == 'no_defaults':
             reply += 'ndt;'
+        elif k == 'adetailer':
+            reply += 'adt;'
         elif k in skip:
             continue
         elif k == 'width':
             res = res.replace('w', str(v))
         elif k == 'height':
             res = res.replace('h', str(v))
+        elif k == 'ad_inpaint_width':
+            ares = ares.replace('w', str(v))
+        elif k == 'ad_inpaint_height':
+            ares = ares.replace('h', str(v))
         elif k == 'negative_prompt':
             reply += f'{prettyPrintMapping[k]}: {formatPrompt(k, not dflt, obj, dflt, format)};'
         else:
             reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
-
+    if ares != 'wxh':
+        reply += f'ares: {ares};'
     if res != 'wxh' and res != defres or obj is payload:
         reply += f'res: {res};'
     if 'img_scale' in merged:
@@ -671,7 +727,11 @@ def sample_image_meta(embed: Embed, name: str, image: CivClass.ModelVersionImage
 
     populateData('steps', data, meta)
     if 'negativePrompt' in meta:
-        data['negative_prompt'] = meta['negativePrompt']
+        neg = meta['negativePrompt']
+        if len(neg) < 75:
+            data['negative_prompt'] = meta['negativePrompt']
+        else:
+            data['negative_prompt'] = '*more than 75 tokens of schizo negs*'
     if 'Size' in meta:
         res = meta['Size'].split('x')
         data['width'] = res[0]
@@ -743,7 +803,7 @@ async def c_info(ctx: Context, model_version: int):
             break
     embed = Embed(colour=Colour.blurple())
     image = version.images[0]
-    filename = file.name[:-12]
+    # filename = file.name[:-12]
     img = download_civitai_image(file.name + '.preview.jpg', image.url)
     prompt = parseLoraInfo(embed, version, file.name)
     await ctx.reply(content=prompt, embed=embed, file=File(img))
@@ -848,8 +908,12 @@ async def listLoras(ctx: Context, *, message: str = ''):
 
 
 def stripHTML(s: str) -> str:
-    html = re.compile(r'<[^>\n]+>')
-    return html.sub('', s)
+    if not s:
+        return ''
+    elif html := re.findall(r'<[^>\n]+>', s):
+        for h in html:
+            s = s.replace(h, '')
+    return s
 
 
 def timestamp():
@@ -875,23 +939,50 @@ def genAndRespond(obj: dict):
             settings[s] = settings[s].replace(match.group(1), '')
     obj['prompt'] = settings['prompt'] = formatWildcards(settings['prompt'])
     obj['author'] = author
-    response = requests.post(url=sdapi(genType), json=settings | alwayson)
+
+    settings = settings | alwayson
+    aDetailerPayload(settings, genType)
+
+    response = requests.post(url=sdapi(genType), json=settings)
     if 'author' in obj:
         obj.pop('author')
-    r = response.json()
-    info = json.loads(r['info'])
-    reply = f'```\n{prettyPrintSettings(obj, info['seed'], userdata[author][genType] if exists else None, True)}\n```'
+    if response.ok:
+        response = response.json()
+    else:
+        sendMessage(message='The API isn\'t responding. This is probably very bad.')
+        return
+    info = json.loads(response['info'])
+    reply = f'```\n{prettyPrintSettings(obj, info['seed'], userdata[author][genType] if exists else None, True)}```'
     filepath = outputDir + author + '/'
     os.makedirs(filepath, exist_ok=True)
     filepath += SD['timestamp'] + '.png'
-    if 'images' in r:
+    if 'images' in response:
         with open(filepath, 'wb') as f:
-            f.write(base64.b64decode(r['images'][0]))
+            f.write(base64.b64decode(response['images'][0]))
             f.close()
         sendMessage(message=reply, file=File(filepath), ref=SD['ref'])
     else:
         sendMessage(message=reply + 'Output contains no image data, possibly due to cancelled generation.',
                     ref=SD['ref'])
+
+
+def aDetailerPayload(settings: dict, genType: str):
+    if genType == 'img2img' and 'adetailer' in settings:
+        settings.pop('adetailer')
+    settings['alwayson_scripts'].pop('forge couple')
+    ad_settings = settings['alwayson_scripts']['ADetailer']['args']
+    ad_settings[0] = True
+    ad_settings[1] = True
+    ad_obj = dict(ad_payload)
+    ad_obj['ad_prompt'] = settings['prompt']
+    ad_obj['ad_negative_prompt'] = settings['negative_prompt']
+    if 'ad_denoising_strength' in settings:
+        ad_obj['ad_denoising_strength'] = settings.pop('ad_denoising_strength')
+    if 'ad_inpaint_width' in settings and 'ad_inpaint_height' in settings:
+        ad_obj['ad_use_inpaint_width_height'] = True
+        ad_obj['ad_inpaint_width'] = settings.pop('ad_inpaint_width')
+        ad_obj['ad_inpaint_height'] = settings.pop('ad_inpaint_height')
+    ad_settings.append(ad_obj)
 
 
 def getSamplers():
