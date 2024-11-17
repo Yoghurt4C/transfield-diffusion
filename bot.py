@@ -13,6 +13,7 @@ from re import RegexFlag
 from textwrap import wrap
 from threading import Thread
 from time import sleep
+import copy
 
 import discord.permissions
 import requests
@@ -78,8 +79,7 @@ payload = {
     "prompt": "{}",
     "negative_prompt": "rating_explicit, text, watermark, logo, {}",
     "width": 576,
-    "height": 768,
-    'infotext': ''
+    "height": 768
 }
 
 alwayson = {
@@ -97,7 +97,7 @@ alwayson = {
         },
         "forge couple": {
             "args": [
-                True,
+                False,
                 False,
                 "Basic",
                 "[SEP]",
@@ -404,7 +404,7 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
     }
     skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale']
     reply = '!autism ['
-    merged = dflt | obj if dflt else obj
+    merged = dict(dflt | obj) if dflt else obj
     res = 'wxh'
     ares = 'wxh'
     defres = f'{payload['width']}x{payload['height']}'
@@ -513,8 +513,9 @@ async def autism(ctx: Context, *, message=''):
         if not 'seed' in obj:
             obj['seed'] = random.randint(1, 2 ** 31 - 1)
         for s in split:
-            qObj = dict(obj)
+            qObj = copy.deepcopy(obj)
             qObj['prompt'] = s
+            qObj['SD']['timestamp'] += '-' + i + 1
             q.put((genNum + i, qObj))
             i += 1
             genNum += 1
@@ -925,10 +926,10 @@ def genAndRespond(obj: dict):
     genType = obj.pop('gen_type')
     dflt = dict(payload)
     if genType == 'img2img':
-        dflt = dflt | imgDefaults
+        dflt = dict(dflt | imgDefaults)
     author = SD['author']
     exists = author in userdata and genType in userdata[author]
-    settings = (dflt | userdata[author][genType]) if exists else dflt
+    settings = dict(dflt | userdata[author][genType]) if exists else dflt
     burp = validateSettings(settings, obj, userdata[author][genType] if exists else dflt)
     if burp:
         sendMessage(burp, ref=SD['ref'])
@@ -940,8 +941,8 @@ def genAndRespond(obj: dict):
     obj['prompt'] = settings['prompt'] = formatWildcards(settings['prompt'])
     obj['author'] = author
 
-    settings = settings | alwayson
-    aDetailerPayload(settings, genType)
+    settings = copy.deepcopy(settings | alwayson)
+    extensionPayload(settings, genType)
 
     response = requests.post(url=sdapi(genType), json=settings)
     if 'author' in obj:
@@ -966,7 +967,9 @@ def genAndRespond(obj: dict):
                     ref=SD['ref'])
 
 
-def aDetailerPayload(settings: dict, genType: str):
+def extensionPayload(settings: dict, genType: str):
+    if 'adetailer' not in settings and '[SEP]' in settings['prompt']:
+        settings['alwayson_scripts']['forge couple']['args'][0] = True
     if genType == 'img2img' and 'adetailer' in settings:
         settings.pop('adetailer')
         settings['alwayson_scripts'].pop('forge couple')
