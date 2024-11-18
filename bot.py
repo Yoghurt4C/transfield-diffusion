@@ -309,7 +309,10 @@ def splitPrompts(prompt: str):
 def formatPrompt(key: str, nodef: bool, obj: dict, defSettings: dict, shouldFormat=True):
     exists = key in obj
     if not defSettings or key not in defSettings:
-        return obj[key] if exists else payload[key]
+        if nodef and exists and key in payload and payload[key] == obj[key]:
+            return ''
+        else:
+            return obj[key] if exists else payload[key]
     defPrompt = defSettings[key].strip()
     if exists:
         if nodef or not defPrompt:
@@ -355,14 +358,15 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
             x = 1024 / max(width, height)
             width = int(width * x)
             height = int(height * x)
-        if 'img_scale' in obj:
-            scale = obj['img_scale']
-            width *= scale
-            height *= scale
-        elif 'img_scale' in defSettings:
-            scale = defSettings['img_scale']
-            width *= scale
-            height *= scale
+        if not adt:
+            if 'img_scale' in obj:
+                scale = obj['img_scale']
+                width *= scale
+                height *= scale
+            elif 'img_scale' in defSettings:
+                scale = defSettings['img_scale']
+                width *= scale
+                height *= scale
         obj['width'] = int(width - (width % 8))
         obj['height'] = int(height - (height % 8))
     if 'ad_inpaint_width' in obj and 'ad_inpaint_height' in obj:
@@ -402,12 +406,12 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         'img_scale': 'scale',
         'ad_denoising_strength': 'aden'
     }
-    skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale']
+    skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale', 'alwayson_scripts', 'resize_mode', 'override_settings']
     reply = '!autism ['
     merged = dict(dflt | obj) if dflt else obj
     res = 'wxh'
     ares = 'wxh'
-    defres = f'{payload['width']}x{payload['height']}'
+    #defres = f'{payload['width']}x{payload['height']}'
     for k, v in merged.items():
         if k == 'no_defaults':
             reply += 'ndt;'
@@ -424,12 +428,15 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         elif k == 'ad_inpaint_height':
             ares = ares.replace('h', str(v))
         elif k == 'negative_prompt':
+            # todo fix
+            if 'no_defaults' in merged and merged['no_defaults'] and not v:
+                continue
             reply += f'{prettyPrintMapping[k]}: {formatPrompt(k, not dflt, obj, dflt, format)};'
         else:
             reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
     if ares != 'wxh':
         reply += f'ares: {ares};'
-    if res != 'wxh' and res != defres or obj is payload:
+    if res != 'wxh' """and res != defres or obj is payload""":
         reply += f'res: {res};'
     if 'img_scale' in merged:
         reply += 'scale: 1;' if format else f'scale: {merged['img_scale']}'
@@ -804,9 +811,9 @@ async def c_info(ctx: Context, model_version: int):
             break
     embed = Embed(colour=Colour.blurple())
     image = version.images[0]
-    # filename = file.name[:-12]
-    img = download_civitai_image(file.name + '.preview.jpg', image.url)
-    prompt = parseLoraInfo(embed, version, file.name)
+    filename = file.name[:-12]
+    img = download_civitai_image(filename + '.preview.jpg', image.url)
+    prompt = parseLoraInfo(embed, version, filename)
     await ctx.reply(content=prompt, embed=embed, file=File(img))
 
 
@@ -953,7 +960,7 @@ def genAndRespond(obj: dict):
         sendMessage(message='The API isn\'t responding. This is probably very bad.')
         return
     info = json.loads(response['info'])
-    reply = f'```\n{prettyPrintSettings(obj, info['seed'], userdata[author][genType] if exists else None, True)}```'
+    reply = f'```\n{prettyPrintSettings(settings, info['seed'], userdata[author][genType] if exists else None, True)}```'
     filepath = outputDir + author + '/'
     os.makedirs(filepath, exist_ok=True)
     filepath += SD['timestamp'] + '.png'
