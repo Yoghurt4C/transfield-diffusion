@@ -309,10 +309,7 @@ def splitPrompts(prompt: str):
 def formatPrompt(key: str, nodef: bool, obj: dict, defSettings: dict, shouldFormat=True):
     exists = key in obj
     if not defSettings or key not in defSettings:
-        if nodef and exists and key in payload and payload[key] == obj[key]:
-            return ''
-        else:
-            return obj[key] if exists else payload[key]
+        return obj[key] if exists else payload[key]
     defPrompt = defSettings[key].strip()
     if exists:
         if nodef or not defPrompt:
@@ -428,9 +425,6 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         elif k == 'ad_inpaint_height':
             ares = ares.replace('h', str(v))
         elif k == 'negative_prompt':
-            # todo fix
-            if 'no_defaults' in merged and merged['no_defaults'] and not v:
-                continue
             reply += f'{prettyPrintMapping[k]}: {formatPrompt(k, not dflt, obj, dflt, format)};'
         else:
             reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
@@ -960,7 +954,7 @@ def genAndRespond(obj: dict):
         sendMessage(message='The API isn\'t responding. This is probably very bad.')
         return
     info = json.loads(response['info'])
-    reply = f'```\n{prettyPrintSettings(settings, info['seed'], userdata[author][genType] if exists else None, True)}```'
+    reply = f'```\n{prettyPrintSettings(obj, info['seed'], userdata[author][genType] if exists else None, True)}```'
     filepath = outputDir + author + '/'
     os.makedirs(filepath, exist_ok=True)
     filepath += SD['timestamp'] + '.png'
