@@ -351,10 +351,6 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
     if 'width' in obj and 'height' in obj:
         width = obj['width']
         height = obj['height']
-        if width > 1280 and height > 800 or height > 1280 and width > 800:
-            x = 1024 / max(width, height)
-            width = int(width * x)
-            height = int(height * x)
         if not adt:
             if 'img_scale' in obj:
                 scale = obj['img_scale']
@@ -364,6 +360,10 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
                 scale = defSettings['img_scale']
                 width *= scale
                 height *= scale
+        if width > 1280 and height > 800 or height > 1280 and width > 800:
+            x = 1024 / max(width, height)
+            width = int(width * x)
+            height = int(height * x)
         obj['width'] = int(width - (width % 8))
         obj['height'] = int(height - (height % 8))
     if 'ad_inpaint_width' in obj and 'ad_inpaint_height' in obj:
@@ -403,12 +403,12 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         'img_scale': 'scale',
         'ad_denoising_strength': 'aden'
     }
-    skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale', 'alwayson_scripts', 'resize_mode', 'override_settings']
+    skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale']
     reply = '!autism ['
     merged = dict(dflt | obj) if dflt else obj
     res = 'wxh'
     ares = 'wxh'
-    #defres = f'{payload['width']}x{payload['height']}'
+    defres = f'{payload['width']}x{payload['height']}'
     for k, v in merged.items():
         if k == 'no_defaults':
             reply += 'ndt;'
@@ -430,7 +430,7 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
             reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
     if ares != 'wxh':
         reply += f'ares: {ares};'
-    if res != 'wxh' """and res != defres or obj is payload""":
+    if res != 'wxh' and res != defres or obj is payload:
         reply += f'res: {res};'
     if 'img_scale' in merged:
         reply += 'scale: 1;' if format else f'scale: {merged['img_scale']}'
