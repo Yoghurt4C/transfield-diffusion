@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import copy
 import json
 import os
 import random
@@ -7,16 +8,17 @@ import re
 import time
 import traceback
 from datetime import datetime as Date
+from io import BytesIO
 from pathlib import Path
 from queue import Queue, PriorityQueue
 from re import RegexFlag
 from textwrap import wrap
 from threading import Thread
 from time import sleep
-import copy
 
 import discord.permissions
 import requests
+from PIL import Image
 from civitai_downloader import api_class as CivClass
 from civitai_downloader import download_file
 from civitai_downloader.api_class import ModelVersion, BaseModel
@@ -63,8 +65,6 @@ else:
     exit(0)
 
 placeholderRemover = r'(\s?{}\s?)'
-cfgRegex = r'^\[([^]]+)\]'
-lineRegex = r'(\w+)[:=]\s?([^$]+)|ndt'
 
 wigwam = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=wigwam)
@@ -106,12 +106,38 @@ alwayson = {
                 0.3,
                 None
             ]
+        },
+        "ControlNet": {
+            "args": [
+                {
+                    "enabled": False
+                }
+            ]
         }
     }
 }
 
 ad_payload = {
     "ad_model": "face_yolov8n.pt"
+}
+
+cn_modes = {'balanced': 'Balanced', 'prompt': 'My prompt is more important', 'cnet': 'ControlNet is more important'}
+cn_payload = {
+    "control_mode": "My prompt is more important",
+    "enabled": True,
+    "guidance_end": 0.4,
+    "guidance_start": 0,
+    "hr_option": "Both",
+    "image": "",
+    "input_mode": "simple",
+    "mask_image": None,
+    "model": "CN-anytest_v4-marged_pn_dim256 [2fe07d89]",
+    "module": "None",
+    "pixel_perfect": True,
+    "resize_mode": "Crop and Resize",
+    "save_detected_map": False,
+    "use_preview_as_input": False,
+    "weight": 1.6
 }
 
 txtDefaults = {
@@ -249,13 +275,33 @@ def parseRes(obj: dict, x: str, width: str, height: str):
 
 
 def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
-    match = re.search(cfgRegex, message)
+    if match := re.search(r'<?(http[^> \n]+)>?', message):
+        url = match.group(1)
+        try:
+            response = requests.get(url)
+            if response.ok:
+                img = Image.open(BytesIO(response.content))
+                if img.format.lower() in ['png', 'jpg', 'jpeg', 'webp']:
+                    if img.mode in ['RGBA', 'P']: img = img.convert('RGB')
+                    obj['width'] = img.width
+                    obj['height'] = img.height
+                    obj['init_images'] = [base64.b64encode(response.content).decode()]
+                    obj['image_url'] = url
+                    img.close()
+                else:
+                    return 'Provided image URL is not a valid format. The API only expects png, jpg and webp images.'
+        except Exception as e:
+            return traceback.format_exception_only(e)
+        message = message[match.span()[1]:].strip()
+
+    match = re.search(r'^\[([^]]+)]', message)
     if match:
         cfgs = match.group(1).split(';')
+        cnet = {}
         try:
             for s in cfgs:
                 s: str = s.strip()
-                line = re.search(lineRegex, s)
+                line = re.search(r'(\w+)[:=]\s?([^$]+)', s)
                 if line and line.lastindex == 2:
                     k = line.group(1)
                     v = line.group(2).strip()
@@ -279,15 +325,36 @@ def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
                         obj['ad_denoising_strength'] = float(v)
                     elif k.startswith('ares'):
                         parseRes(obj, v, 'ad_inpaint_width', 'ad_inpaint_height')
+                    elif k.startswith('cnstp'):
+                        values = re.findall('([0-9.]+)[,: ]*', v)
+                        if len(values) == 1:
+                            cnet['guidance_end'] = float(values[0])
+                        else:
+                            cnet['guidance_start'] = float(values[0])
+                            cnet['guidance_end'] = float(values[1])
+                    elif k == 'cn':
+                        obj['controlnet'] = True
+                        cnet['weight'] = float(v)
+                    elif k.startswith('cnmode'):
+                        if v.isdigit() and 0 <= int(v) <= 2:
+                            cnet['control_mode'] = int(v)
+                        elif v in cn_modes:
+                            cnet['control_mode'] = cn_modes[v]
+                        else:
+                            raise ValueError(f'Unknown ControlNet mode `{v}` passed in generation settings.')
                     else:
                         obj[k] = v
                 elif s == 'ndt':
                     obj['no_defaults'] = True
                 elif s == 'adt':
                     obj['adetailer'] = True
+                elif s == 'cn':
+                    obj['controlnet'] = True
         except Exception as e:
             return traceback.format_exception_only(e)
         message = message[match.span()[1]:].strip()
+        if 'controlnet' in obj and cnet:
+            obj['cnet_cfg'] = cnet
     obj['prompt'] = message
     return ''
 
@@ -341,9 +408,10 @@ def formatWildcards(prompt: str) -> str:
     return prompt
 
 
-def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=True):
+def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=True, genType='txt2img'):
     if defSettings is None:
         defSettings = payload
+    img = genType == 'img2img'
     nodef = 'no_defaults' in obj
     adt = 'adetailer' in obj
     for k in ['prompt', 'negative_prompt']:
@@ -351,7 +419,10 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
     if 'width' in obj and 'height' in obj:
         width = obj['width']
         height = obj['height']
+        mRes = 1024
         if not adt:
+            if img:
+                mRes = 1536
             if 'img_scale' in obj:
                 scale = obj['img_scale']
                 width *= scale
@@ -360,8 +431,8 @@ def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=Tr
                 scale = defSettings['img_scale']
                 width *= scale
                 height *= scale
-        if width > 1280 and height > 800 or height > 1280 and width > 800:
-            x = 1024 / max(width, height)
+        if width * height > (2359296 if img else 1048576):
+            x = mRes / max(width, height)
             width = int(width * x)
             height = int(height * x)
         obj['width'] = int(width - (width % 8))
@@ -403,17 +474,45 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         'img_scale': 'scale',
         'ad_denoising_strength': 'aden'
     }
-    skip = ['prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale']
-    reply = '!autism ['
+    skip = ['author', 'prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale', 'controlnet',
+            'cnet_cfg',
+            'image_url']
     merged = dict(dflt | obj) if dflt else obj
+    if 'image_url' in merged:
+        reply = f'!autism <{merged['image_url']}> ['
+    else:
+        reply = '!autism ['
     res = 'wxh'
     ares = 'wxh'
     defres = f'{payload['width']}x{payload['height']}'
+    cns = ''
+    if 'controlnet' in merged:
+        cns = 'cn:{wt};'
     for k, v in merged.items():
         if k == 'no_defaults':
             reply += 'ndt;'
         elif k == 'adetailer':
             reply += 'adt;'
+        elif k == 'cnet_cfg' and 'controlnet' in merged:
+            cnet = merged['cnet_cfg']
+            if 'weight' in cnet:
+                cns = cns.replace('{wt}', str(cnet['weight']))
+            else:
+                cns = cns.replace(':{wt}', '')
+            if 'guidance_end' in cnet:
+                if 'guidance_start' in cnet:
+                    cns += f'cnstp:{cnet['guidance_start']}, {cnet['guidance_end']};'
+                else:
+                    cns += f'cnstp:{cnet['guidance_end']};'
+            if 'control_mode' in cnet:
+                mode = cnet['control_mode']
+                if type(mode) == int:
+                    cns += f'cnmode:{'balanced' if mode == 0 else 'prompt' if mode == 1 else 'cnet'};'
+                else:
+                    for cnk, cnv in cn_modes.items():
+                        if mode == cnv:
+                            cns += f'cnmode:{cnk};'
+                            break
         elif k in skip:
             continue
         elif k == 'width':
@@ -430,6 +529,8 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
             reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
     if ares != 'wxh':
         reply += f'ares: {ares};'
+    if cns:
+        reply += cns
     if res != 'wxh' and res != defres or obj is payload:
         reply += f'res: {res};'
     if 'img_scale' in merged:
@@ -438,6 +539,8 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         reply += f'seed: {seed}'
     elif 'seed' in obj and (int(obj['seed']) > -1 or obj is payload):
         reply += f'seed: {obj['seed']}'
+    else:
+        reply += 'seed: -1'
     reply += f'] {formatPrompt('prompt', not dflt, obj, dflt, format)}'
     return reply.replace(';]', ']', 1).replace('[] ', '', 1)
 
@@ -483,6 +586,7 @@ async def autism(ctx: Context, *, message=''):
     global genNum
     obj = {'gen_type': 'txt2img'}
     message = matchSettings(obj, message)
+    notcnt = 'controlnet' not in obj
     if message:
         sendMessage(message, ref=ctx.message)
         return
@@ -491,16 +595,19 @@ async def autism(ctx: Context, *, message=''):
         if msg.attachments:
             img = msg.attachments[0]
             if img.content_type.endswith('/png') or img.content_type.endswith('/jpeg'):
-                obj['gen_type'] = 'img2img'
+                if notcnt or 'denoising_strength' in obj:
+                    obj['gen_type'] = 'img2img'
                 if not 'width' in obj:
                     obj['width'] = img.width
                 if not 'height' in obj:
                     obj['height'] = img.height
                 obj['init_images'] = [img.url]
-        if obj['gen_type'] == 'txt2img' and 'img_scale' in obj:
+        if obj['gen_type'] == 'txt2img' and 'img_scale' in obj and notcnt:
             obj.pop('img_scale')
 
-    if ctx.message.attachments:
+    if 'image_url' in obj:
+        if notcnt or 'denoising_strength' in obj: obj['gen_type'] = 'img2img'
+    elif ctx.message.attachments:
         imgCheck(ctx.message, obj)
     elif ctx.message.type is discord.MessageType.reply:
         reply = await ctx.message.channel.fetch_message(ctx.message.reference.message_id)
@@ -514,9 +621,10 @@ async def autism(ctx: Context, *, message=''):
         if not 'seed' in obj:
             obj['seed'] = random.randint(1, 2 ** 31 - 1)
         for s in split:
-            qObj = copy.deepcopy(obj)
+            qObj = dict(obj)
             qObj['prompt'] = s
-            qObj['SD']['timestamp'] += '-' + i + 1
+            qObj['SD'] = dict(obj['SD'])
+            qObj['SD']['timestamp'] += '-' + str(i + 1)
             q.put((genNum + i, qObj))
             i += 1
             genNum += 1
@@ -779,9 +887,15 @@ def parseLoraInfo(embed: Embed, model: ModelVersion, filename: str) -> str:
     embed.set_author(name=prompt)
     mBase = '[🐴💖] ' if model.baseModel == BaseModel.PONY.value else '[🇽🇱] '
     embed.title = f'{mBase} {model.model.get("name")}'
-    embed.description = stripHTML(model.description)
+    descr = stripHTML(model.description)
+    descr = wrap(descr, 400, expand_tabs=False, replace_whitespace=False, break_long_words=False,
+                 drop_whitespace=False)
+    embed.description = descr[0]
     if 'description' in model.model and model.description != model.model['description']:
-        embed.add_field(name='About Version', value=stripHTML(model.model['description']), inline=False)
+        descr = wrap(stripHTML(model.model['description']), 400, expand_tabs=False, replace_whitespace=False,
+                     break_long_words=False,
+                     drop_whitespace=False)
+        embed.add_field(name='About Version', value=descr[0], inline=False)
     if model.trainedWords:
         triggers = list()
         for w in model.trainedWords:
@@ -931,7 +1045,7 @@ def genAndRespond(obj: dict):
     author = SD['author']
     exists = author in userdata and genType in userdata[author]
     settings = dict(dflt | userdata[author][genType]) if exists else dflt
-    burp = validateSettings(settings, obj, userdata[author][genType] if exists else dflt)
+    burp = validateSettings(settings, obj, userdata[author][genType] if exists else dflt, genType=genType)
     if burp:
         sendMessage(burp, ref=SD['ref'])
         return
@@ -940,21 +1054,18 @@ def genAndRespond(obj: dict):
         if match:
             settings[s] = settings[s].replace(match.group(1), '')
     obj['prompt'] = settings['prompt'] = formatWildcards(settings['prompt'])
-    obj['author'] = author
 
     settings = copy.deepcopy(settings | alwayson)
     extensionPayload(settings, genType)
-
+    reply = f'```\n{prettyPrintSettings(obj, -1, userdata[author][genType] if exists else None, True)}```'
     response = requests.post(url=sdapi(genType), json=settings)
-    if 'author' in obj:
-        obj.pop('author')
     if response.ok:
         response = response.json()
     else:
         sendMessage(message='The API isn\'t responding. This is probably very bad.')
         return
     info = json.loads(response['info'])
-    reply = f'```\n{prettyPrintSettings(obj, info['seed'], userdata[author][genType] if exists else None, True)}```'
+    reply = reply.replace('seed: -1', f'seed: {info['seed']}', 1)
     filepath = outputDir + author + '/'
     os.makedirs(filepath, exist_ok=True)
     filepath += SD['timestamp'] + '.png'
@@ -971,6 +1082,22 @@ def genAndRespond(obj: dict):
 def extensionPayload(settings: dict, genType: str):
     if 'adetailer' not in settings and '[SEP]' in settings['prompt']:
         settings['alwayson_scripts']['forge couple']['args'][0] = True
+    if 'controlnet' in settings:
+        settings.pop('controlnet')
+        cnet = settings.pop('cnet_cfg') if 'cnet_cfg' in settings else None
+        if 'init_images' in settings:
+            cn_settings = dict(cn_payload)
+            if cnet:
+                cn_settings.update(cnet)
+            if 'image_url' in settings:
+                cn_settings['image'] = settings['init_images'][0]
+            else:
+                img = requests.get(settings['init_images'][0])
+                image_bytes = BytesIO(img.content)
+                encoded_image = base64.b64encode(image_bytes.read()).decode()
+                cn_settings['image'] = encoded_image
+            settings['alwayson_scripts']['ControlNet']['args'][0].update(cn_settings)
+
     if genType == 'img2img' and 'adetailer' in settings:
         settings.pop('adetailer')
         settings['alwayson_scripts'].pop('forge couple')
