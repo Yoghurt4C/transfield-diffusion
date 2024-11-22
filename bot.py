@@ -496,9 +496,7 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         elif k == 'cnet_cfg' and 'controlnet' in merged:
             cnet = merged['cnet_cfg']
             if 'weight' in cnet:
-                cns = cns.replace('{wt}', str(cnet['weight']))
-            else:
-                cns = cns.replace(':{wt}', '')
+                cns = cns.replace('{wt}', str(cnet['weight']), 1)
             if 'guidance_end' in cnet:
                 if 'guidance_start' in cnet:
                     cns += f'cnstp:{cnet['guidance_start']}, {cnet['guidance_end']};'
@@ -530,7 +528,7 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
     if ares != 'wxh':
         reply += f'ares: {ares};'
     if cns:
-        reply += cns
+        reply += cns.replace(':{wt}', '',1)
     if res != 'wxh' and res != defres or obj is payload:
         reply += f'res: {res};'
     if 'img_scale' in merged:
@@ -1113,6 +1111,8 @@ def extensionPayload(settings: dict, genType: str):
             ad_obj['ad_use_inpaint_width_height'] = True
             ad_obj['ad_inpaint_width'] = settings.pop('ad_inpaint_width')
             ad_obj['ad_inpaint_height'] = settings.pop('ad_inpaint_height')
+        ad_obj['ad_use_sampler'] = True
+        ad_obj['ad_sampler'] = settings['sampler_name']
         ad_settings.append(ad_obj)
 
 
