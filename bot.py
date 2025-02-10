@@ -23,13 +23,14 @@ from civitai_downloader import api_class as CivClass
 from civitai_downloader import download_file
 from civitai_downloader.api_class import ModelVersion, BaseModel
 from civitai_downloader.client import APIClient
-from discord import ApplicationContext
+from discord import ApplicationContext, Reaction, RawReactionActionEvent, RawReactionClearEmojiEvent
 from discord import Colour
 from discord import Embed
 from discord.ext import commands
 from discord.ext.commands.context import Context
 from discord.file import File
 from discord.message import PartialMessage
+from rich.emoji import Emoji
 
 api_url = "http://127.0.0.1:7860/"
 
@@ -117,8 +118,10 @@ alwayson = {
     }
 }
 
-ad_payload = {
-    "ad_model": "face_yolov8n.pt"
+ad_models = {
+    'box': "face_yolov8n.pt",
+    'mask': "Anzhc Face seg 640 v2 y8n.pt",
+    'hand': 'hand_yolov8n.pt'
 }
 
 cn_modes = {'balanced': 'Balanced', 'prompt': 'My prompt is more important', 'cnet': 'ControlNet is more important'}
@@ -144,6 +147,9 @@ txtDefaults = {
     "steps": 12,
     "cfg_scale": 3.5,
     "sampler_name": "Euler a",
+    'override_settings': {
+        "emphasis": "No norm"
+    }
 }
 
 imgDefaults = {
@@ -152,6 +158,7 @@ imgDefaults = {
     'include_init_images': False,
     'override_settings': {
         "img2img_fix_steps": True,
+        "emphasis": "No norm"
     }
 }
 
@@ -257,21 +264,19 @@ async def advPrompt(ctx: discord.ApplicationContext, prompt: str, negs: str = No
 '''
 
 
-def parseRes(obj: dict, x: str, width: str, height: str):
+def parseRes(mRes:int, obj: dict, x: str, width: str, height: str):
     res = x.split('x')
     if len(res) == 2:
         w = int(res[0])
         h = int(res[1])
-        if w * h > 1048576:  # 1024x1024
-            raise SyntaxError(
-                f'Can\'t generate an image larger than 1024x1024 due to vram constraints. Try 1024x768 or 1280x800')
+        if w * h > mRes**2:
+            return f'Can\'t generate an image larger than {str(mRes)}x{str(mRes)} due to vram constraints.'
         obj[width] = w
         obj[height] = h
     elif len(res) == 1:
-        obj[width] = obj[height] = min(1024, int(res[0]))
+        obj[width] = obj[height] = min(mRes, int(res[0]))
     else:
-        raise SyntaxError(
-            f'Invalid value passed to the `res:{x}` parameter. Example resolution: `res:1024x768`.')
+        return f'Invalid value passed to the `res:{x}` parameter. Example resolution: `res:1024x768`.'
 
 
 def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
@@ -313,8 +318,6 @@ def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
                         obj['steps'] = int(v)
                     elif k.startswith('sampler'):
                         obj['sampler_name'] = v
-                    elif k.startswith('res'):
-                        parseRes(obj, v, 'width', 'height')
                     elif k == 'batch_size' or k == 'enable_hr':
                         raise ValueError(f'{k} is not available at this time.')
                     elif k.startswith('den'):
@@ -323,8 +326,8 @@ def matchSettings(obj: dict, message: str, genType: str = 'txt2img'):
                         obj['img_scale'] = min(max(0.5, float(v)), 2)
                     elif k.startswith('aden'):
                         obj['ad_denoising_strength'] = float(v)
-                    elif k.startswith('ares'):
-                        parseRes(obj, v, 'ad_inpaint_width', 'ad_inpaint_height')
+                    elif k.startswith('amode'):
+                        obj['ad_model'] = v
                     elif k.startswith('cnstp'):
                         values = re.findall('([0-9.]+)[,: ]*', v)
                         if len(values) == 1:
@@ -408,35 +411,58 @@ def formatWildcards(prompt: str) -> str:
     return prompt
 
 
+def formatLoras(prompt:str) -> str:
+    blah = dict(loras)
+    if loras:
+        if matches := re.findall(r'(#[^,]+),?', prompt):
+            for match in matches:
+                split = match.split(':')
+                trimmed = split[0][1:].strip()
+                weight = 1 if len(split) == 1 else float(split[1])
+                for lora in loras:
+                    if trimmed.lower() in lora.lower():
+                        lname = f'<lora:{lora}:{weight}>'
+                        if lname not in prompt:
+                            prompt = prompt.replace(match, f'{lname} {loras[lora][2] or ''}')
+                        continue
+    return prompt
+
 def validateSettings(actual: dict, obj: dict, defSettings: dict, shouldFormat=True, genType='txt2img'):
     if defSettings is None:
         defSettings = payload
     img = genType == 'img2img'
     nodef = 'no_defaults' in obj
     adt = 'adetailer' in obj
+    mRes = 1536 if img and not adt else 1024
     for k in ['prompt', 'negative_prompt']:
         actual[k] = formatPrompt(k, nodef, obj, defSettings, shouldFormat)
+    if 'res' in obj:
+        if r := parseRes(mRes, obj, obj.pop('res'), 'width', 'height'):
+            return r
     if 'width' in obj and 'height' in obj:
         width = obj['width']
         height = obj['height']
-        mRes = 1024
-        if not adt:
-            if img:
-                mRes = 1536
-            if 'img_scale' in obj:
-                scale = obj['img_scale']
-                width *= scale
-                height *= scale
-            elif 'img_scale' in defSettings:
-                scale = defSettings['img_scale']
-                width *= scale
-                height *= scale
-        if width * height > (2359296 if img else 1048576):
-            x = mRes / max(width, height)
-            width = int(width * x)
-            height = int(height * x)
-        obj['width'] = int(width - (width % 8))
-        obj['height'] = int(height - (height % 8))
+    else:
+        width = defSettings['width']
+        height = defSettings['height']
+    if not adt:
+        if 'img_scale' in obj:
+            scale = obj['img_scale']
+            width *= scale
+            height *= scale
+        elif 'img_scale' in defSettings:
+            scale = defSettings['img_scale']
+            width *= scale
+            height *= scale
+    if width * height > (mRes**2):
+        x = mRes / max(width, height)
+        width = int(width * x)
+        height = int(height * x)
+    obj['width'] = int(width - (width % 8))
+    obj['height'] = int(height - (height % 8))
+    if 'ares' in obj:
+        if r:= parseRes(mRes, obj, obj.pop('ares'), 'ad_inpaint_width', 'ad_inpaint_height'):
+            return r
     if 'ad_inpaint_width' in obj and 'ad_inpaint_height' in obj:
         if adt:
             width = obj['ad_inpaint_width']
@@ -472,7 +498,8 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
         'sampler_name': 'sampler',
         'denoising_strength': 'den',
         'img_scale': 'scale',
-        'ad_denoising_strength': 'aden'
+        'ad_denoising_strength': 'aden',
+        'ad_model': 'amode'
     }
     skip = ['author', 'prompt', 'seed', 'init_images', 'infotext', 'include_init_images', 'img_scale', 'controlnet',
             'cnet_cfg',
@@ -488,43 +515,46 @@ def prettyPrintSettings(obj: dict, seed: int = -1, dflt: dict = None, format=Fal
     cns = ''
     if 'controlnet' in merged:
         cns = 'cn:{wt};'
-    for k, v in merged.items():
-        if k == 'no_defaults':
-            reply += 'ndt;'
-        elif k == 'adetailer':
-            reply += 'adt;'
-        elif k == 'cnet_cfg' and 'controlnet' in merged:
-            cnet = merged['cnet_cfg']
-            if 'weight' in cnet:
-                cns = cns.replace('{wt}', str(cnet['weight']), 1)
-            if 'guidance_end' in cnet:
-                if 'guidance_start' in cnet:
-                    cns += f'cnstp:{cnet['guidance_start']}, {cnet['guidance_end']};'
-                else:
-                    cns += f'cnstp:{cnet['guidance_end']};'
-            if 'control_mode' in cnet:
-                mode = cnet['control_mode']
-                if type(mode) == int:
-                    cns += f'cnmode:{'balanced' if mode == 0 else 'prompt' if mode == 1 else 'cnet'};'
-                else:
-                    for cnk, cnv in cn_modes.items():
-                        if mode == cnv:
-                            cns += f'cnmode:{cnk};'
-                            break
-        elif k in skip:
-            continue
-        elif k == 'width':
-            res = res.replace('w', str(v))
-        elif k == 'height':
-            res = res.replace('h', str(v))
-        elif k == 'ad_inpaint_width':
-            ares = ares.replace('w', str(v))
-        elif k == 'ad_inpaint_height':
-            ares = ares.replace('h', str(v))
-        elif k == 'negative_prompt':
-            reply += f'{prettyPrintMapping[k]}: {formatPrompt(k, not dflt, obj, dflt, format)};'
-        else:
-            reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
+    try:
+        for k, v in merged.items():
+            if k == 'no_defaults':
+                reply += 'ndt;'
+            elif k == 'adetailer':
+                reply += 'adt;'
+            elif k == 'cnet_cfg' and 'controlnet' in merged:
+                cnet = merged['cnet_cfg']
+                if 'weight' in cnet:
+                    cns = cns.replace('{wt}', str(cnet['weight']), 1)
+                if 'guidance_end' in cnet:
+                    if 'guidance_start' in cnet:
+                        cns += f'cnstp:{cnet['guidance_start']}, {cnet['guidance_end']};'
+                    else:
+                        cns += f'cnstp:{cnet['guidance_end']};'
+                if 'control_mode' in cnet:
+                    mode = cnet['control_mode']
+                    if type(mode) == int:
+                        cns += f'cnmode:{'balanced' if mode == 0 else 'prompt' if mode == 1 else 'cnet'};'
+                    else:
+                        for cnk, cnv in cn_modes.items():
+                            if mode == cnv:
+                                cns += f'cnmode:{cnk};'
+                                break
+            elif k in skip:
+                continue
+            elif k == 'width':
+                res = res.replace('w', str(v))
+            elif k == 'height':
+                res = res.replace('h', str(v))
+            elif k == 'ad_inpaint_width':
+                ares = ares.replace('w', str(v))
+            elif k == 'ad_inpaint_height':
+                ares = ares.replace('h', str(v))
+            elif k == 'negative_prompt':
+                reply += f'{prettyPrintMapping[k]}: {formatPrompt(k, not dflt, obj, dflt, format)};'
+            else:
+                reply += f'{prettyPrintMapping[k] if k in prettyPrintMapping else k}: {v};'
+    except Exception as e:
+        return traceback.format_exception_only(e)
     if ares != 'wxh':
         reply += f'ares: {ares};'
     if cns:
@@ -759,7 +789,7 @@ async def wildcards(ctx: Context, *, name: str = None):
                 f.close()
         else:
             return await ctx.reply(f'Couldn\'t find any wildcards named \"{name}\".')
-    else:
+    elif wildcardDir:
         cards = sorted(wildcardDir.glob('*.txt'))
         embed.title = 'Available wildcards:'
         embed.description = ' | '.join([card.stem for card in cards])
@@ -885,10 +915,11 @@ def parseLoraInfo(embed: Embed, model: ModelVersion, filename: str) -> str:
     embed.set_author(name=prompt)
     mBase = '[🐴💖] ' if model.baseModel == BaseModel.PONY.value else '[🇽🇱] '
     embed.title = f'{mBase} {model.model.get("name")}'
-    descr = stripHTML(model.description)
-    descr = wrap(descr, 400, expand_tabs=False, replace_whitespace=False, break_long_words=False,
-                 drop_whitespace=False)
-    embed.description = descr[0]
+    if model.description:
+        descr = stripHTML(model.description)
+        descr = wrap(descr, 400, expand_tabs=False, replace_whitespace=False, break_long_words=False,
+                     drop_whitespace=False)
+        embed.description = descr[0]
     if 'description' in model.model and model.description != model.model['description']:
         descr = wrap(stripHTML(model.model['description']), 400, expand_tabs=False, replace_whitespace=False,
                      break_long_words=False,
@@ -1043,15 +1074,20 @@ def genAndRespond(obj: dict):
     author = SD['author']
     exists = author in userdata and genType in userdata[author]
     settings = dict(dflt | userdata[author][genType]) if exists else dflt
-    burp = validateSettings(settings, obj, userdata[author][genType] if exists else dflt, genType=genType)
-    if burp:
-        sendMessage(burp, ref=SD['ref'])
-        return
+    try:
+        burp = validateSettings(settings, obj, userdata[author][genType] if exists else dflt, genType=genType)
+        if burp:
+            sendMessage(burp, ref=SD['ref'])
+            return
+    except Exception as e:
+        sendMessage(traceback.format_exception_only(e)[0], ref=SD['ref'])
     for s in ['prompt', 'negative_prompt']:
         match = re.search(placeholderRemover, settings[s])
         if match:
             settings[s] = settings[s].replace(match.group(1), '')
-    obj['prompt'] = settings['prompt'] = formatWildcards(settings['prompt'])
+
+    edited = formatWildcards(formatLoras(settings['prompt']))
+    obj['prompt'] = settings['prompt'] = edited
 
     settings = copy.deepcopy(settings | alwayson)
     extensionPayload(settings, genType)
@@ -1102,9 +1138,8 @@ def extensionPayload(settings: dict, genType: str):
         ad_settings = settings['alwayson_scripts']['ADetailer']['args']
         ad_settings[0] = True
         ad_settings[1] = True
-        ad_obj = dict(ad_payload)
-        ad_obj['ad_prompt'] = settings['prompt']
-        ad_obj['ad_negative_prompt'] = settings['negative_prompt']
+        ad_obj = {'ad_prompt': settings['prompt'], 'ad_negative_prompt': settings['negative_prompt'],
+                  'ad_model': ad_models[settings['ad_model']] if 'ad_model' in settings else ad_models['mask']}
         if 'ad_denoising_strength' in settings:
             ad_obj['ad_denoising_strength'] = settings.pop('ad_denoising_strength')
         if 'ad_inpaint_width' in settings and 'ad_inpaint_height' in settings:
@@ -1136,9 +1171,7 @@ def loadUserData():
 
 def getLoras(refresh=True):
     global loras
-    if refresh:
-        requests.post(url=sdapi('refresh-loras'))
-        sleep(6)
+    if refresh and requests.post(url=sdapi('refresh-loras')).ok:
         loras.clear()
     response = requests.get(url=sdapi('loras')).json()
     for obj in response:
@@ -1146,36 +1179,71 @@ def getLoras(refresh=True):
             'ss_base_model_version'].lower():
             s = ''
             i = None
+            t = None
             pth = Path(obj['path'].replace('safetensors', 'civitai.info'))
             if pth.exists():
                 s = pth
+                with open(pth, 'r') as f:
+                    info = json.load(f)
+                    triggers = list()
+                    for w in info['trainedWords']:
+                        if len(triggers) > 4: break
+                        triggers.extend(w.split(','))
+                    triggers = list(dict.fromkeys(triggers))
+                    t = ','.join(triggers[:4] if len(triggers) > 4 else triggers)
+            else:
+                t = ''
+
+
             pth = pth.parent.glob(f'{pth.stem[:-8] + '.preview'}.*')
             if pth:
                 for f in pth:
                     if f.suffix == '.png' or f.suffix == '.jpg':
                         i = f
                         break
-            loras[obj['name']] = (s, i)
+            loras[obj['name']] = (s, i, t)
 
 
 def getWildcards():
     global wildcardList
     wildcardList.clear()
-    files = wildcardDir.glob('*.txt')
-    for file in files:
-        wildcardList.append(file.stem)
+    if wildcardDir:
+        files = wildcardDir.glob('*.txt')
+        for file in files:
+            wildcardList.append(file.stem)
 
+@bot.event
+async def on_raw_reaction_add(evt: RawReactionActionEvent):
+    if evt.channel_id == channelId and evt.emoji.name == '🔞':
+        message = bot.get_message(evt.message_id) or await bot.get_channel(evt.channel_id).fetch_message(evt.message_id)
+        if message.author.id == bot.user.id and message.attachments and 'SPOILER_' not in message.attachments[0].filename:
+            file = await message.attachments[0].to_file(use_cached=True, spoiler=True)
+            await message.edit(attachments=[])
+            await message.edit(file=file)
+
+@bot.event
+async def on_raw_reaction_remove(evt: RawReactionActionEvent):
+    if evt.channel_id == channelId and evt.emoji.name == '🔞':
+        message = bot.get_message(evt.message_id) or await bot.get_channel(evt.channel_id).fetch_message(evt.message_id)
+        if message.author.id == bot.user.id and not message.reactions and message.attachments and 'SPOILER_' in message.attachments[0].filename:
+            file = await message.attachments[0].to_file(use_cached=True, spoiler=False)
+            file.filename = file.filename.replace('SPOILER_', '')
+            await message.edit(attachments=[])
+            await message.edit(file=file)
 
 def mainThread():
     global currentGen
     while True:
         if q.not_empty:
-            currentGen = obj = q.get()[1]
-            genThread = Thread(target=genAndRespond, args=[obj])
-            genThread.start()
-            genThread.join()
-            currentGen = None
-            q.task_done()
+            try:
+                currentGen = obj = q.get()[1]
+                genThread = Thread(target=genAndRespond, args=[obj])
+                genThread.start()
+                genThread.join()
+                currentGen = None
+                q.task_done()
+            except Exception as e:
+                pass
         sleep(4)
 
 
