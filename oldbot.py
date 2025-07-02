@@ -19,18 +19,17 @@ from time import sleep
 import discord.permissions
 import requests
 from PIL import Image
-from civitai_downloader import api_class as CivClass
+from civitai_api import api as capi
 from civitai_downloader import download_file
-from civitai_downloader.api_class import ModelVersion, BaseModel
-from civitai_downloader.client import APIClient
-from discord import ApplicationContext, Reaction, RawReactionActionEvent, RawReactionClearEmojiEvent
+from civitai_api.models import ModelVersion, BaseModel
+from civitai_api import Civitai
+from discord import ApplicationContext, RawReactionActionEvent
 from discord import Colour
 from discord import Embed
 from discord.ext import commands
 from discord.ext.commands.context import Context
 from discord.file import File
 from discord.message import PartialMessage
-from rich.emoji import Emoji
 
 api_url = "http://127.0.0.1:7860/"
 
@@ -50,7 +49,7 @@ if os.path.exists('config.json'):
         mToken = props['token']
         server = discord.Object(id=props['serverId'])
         civToken = props['civitai']
-        capi = APIClient(civToken)
+        civclient = Civitai(civToken)
         cfg.close()
 else:
     cnf = {
@@ -79,15 +78,16 @@ userdata = {}
 payload = {
     "prompt": "{}",
     "negative_prompt": "rating_explicit, text, watermark, logo, {}",
-    "width": 576,
-    "height": 768
+    "width": 720,
+    "height": 960
 }
 
 alwayson = {
     "alwayson_scripts": {
         "Never OOM Integrated": {
             "args": [
-                True, True
+                #True, True
+                False, False
             ]
         },
         "ADetailer": {
@@ -144,8 +144,8 @@ cn_payload = {
 }
 
 txtDefaults = {
-    "steps": 12,
-    "cfg_scale": 3.5,
+    "steps": 16,
+    "cfg_scale": 2.5,
     "sampler_name": "Euler a",
     'override_settings': {
         "emphasis": "No norm"
@@ -803,15 +803,15 @@ async def civitai(ctx: Context):
 
 @civitai.command()
 async def search(ctx: Context, query: str, page: int = 1, limit: int = 20, tag: str | None = None):
-    models = capi.list_models(limit, page=page, query=query, tag=tag, sort=CivClass.Sort.HIGHEST_RATED,
-                              period=CivClass.Period.ALLTIME, types=[CivClass.ModelType.LORA, CivClass.ModelType.LOCON],
-                              baseModel=[CivClass.BaseModel.PONY])
+    models = civclient.models.list_models(limit, page=page, query=query, tag=tag, sort=capi.ModelSort.HIGHEST_RATED,
+                                          period=capi.ModelPeriod.ALL_TIME, types=[capi.models.ModelType.LORA, capi.models.ModelType.LoCon],
+                                          base_models=[capi.models.BaseModel.PONY, capi.models.BaseModel.ILLUSTRIOUS, capi.models.BaseModel.NOOBAI])
     reply = f'Search results for {query}:\n'
     cache = {}
     for model in models.items:
         versions = ''
         for version in model.modelVersions:
-            if version.baseModel == CivClass.BaseModel.PONY.value or version.baseModel == CivClass.BaseModel.SDXL.value:
+            if version.baseModel == capi.models.BaseModel.PONY.value or version.baseModel == capi.models.BaseModel.ILLUSTRIOUS.value or version.baseModel == capi.models.BaseModel.NOOBAI.value:
                 versions += f'**!autism civitai info {version.id}** | Model: {'[🐴💖]' if version.baseModel == BaseModel.PONY.value else '[🇽🇱]'} | Version: __{version.name}__'
                 if version.trainedWords:
                     versions += f'| Trigger Words:\n```\n{', '.join(version.trainedWords)}\n```\n'
@@ -841,7 +841,7 @@ async def search(ctx: Context, query: str, page: int = 1, limit: int = 20, tag: 
         await ctx.reply(reply)
 
 
-def sample_image_meta(embed: Embed, name: str, image: CivClass.ModelVersionImages):
+def sample_image_meta(embed: Embed, name: str, image: capi.models.ModelVersionImage):
     def populateData(key: str, obj: dict, meta: dict):
         if key in meta:
             obj[key] = meta[key]
@@ -914,17 +914,17 @@ def parseLoraInfo(embed: Embed, model: ModelVersion, filename: str) -> str:
     prompt = f'<lora:{filename}:1> '
     embed.set_author(name=prompt)
     mBase = '[🐴💖] ' if model.baseModel == BaseModel.PONY.value else '[🇽🇱] '
-    embed.title = f'{mBase} {model.model.get("name")}'
-    if model.description:
-        descr = stripHTML(model.description)
-        descr = wrap(descr, 400, expand_tabs=False, replace_whitespace=False, break_long_words=False,
-                     drop_whitespace=False)
-        embed.description = descr[0]
-    if 'description' in model.model and model.description != model.model['description']:
-        descr = wrap(stripHTML(model.model['description']), 400, expand_tabs=False, replace_whitespace=False,
-                     break_long_words=False,
-                     drop_whitespace=False)
-        embed.add_field(name='About Version', value=descr[0], inline=False)
+    embed.title = f'{mBase} {model.name}'
+    #if model.description:
+    #   descr = stripHTML(model.description)
+    #   descr = wrap(descr, 400, expand_tabs=False, replace_whitespace=False, break_long_words=False,
+    #                drop_whitespace=False)
+    #   embed.description = descr[0]
+    #f 'description' in model.model and model.description != model.model['description']:
+    #   descr = wrap(stripHTML(model.model['description']), 400, expand_tabs=False, replace_whitespace=False,
+    #                break_long_words=False,
+    #                drop_whitespace=False)
+    #  embed.add_field(name='About Version', value=descr[0], inline=False)
     if model.trainedWords:
         triggers = list()
         for w in model.trainedWords:
@@ -940,7 +940,7 @@ def parseLoraInfo(embed: Embed, model: ModelVersion, filename: str) -> str:
 
 @civitai.command("info")
 async def c_info(ctx: Context, model_version: int):
-    version = capi.get_model_version(model_version)
+    version = civclient.model_versions.get_model_version(model_version)
     file = version.files[0]
     for f in version.files:
         if f.primary:
@@ -968,7 +968,7 @@ async def c_download(ctx: Context, model_version: int):
     filename = file['name']
     info = filename.replace('safetensors', 'civitai.info')
     if not obj['description']:
-        model = capi.get_model(obj['modelId'])
+        model = civclient.models.get_model(obj['modelId'])
         description = model.description
     else:
         description = obj['description']
@@ -1041,7 +1041,7 @@ async def listLoras(ctx: Context, *, message: str = ''):
             if f['primary']:
                 file = f
                 break
-        reply = parseLoraInfo(embed, capi._model_version._parse_model_version(info), file['name'][:-12])
+        reply = parseLoraInfo(embed, civclient._model_version._parse_model_version(info), file['name'][:-12])
         img = lora[1]
         await ctx.reply(reply, embed=embed, file=None if img is None else File(img))
     else:
